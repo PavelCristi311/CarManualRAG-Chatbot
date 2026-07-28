@@ -1,0 +1,26 @@
+<resources>
+    <string name="app_name">Atlas Manual Assistant</string>
+    <string name="subtitle">Private • fully offline • 2019 Atlas 3.6L</string>
+    <string name="hint">Ask about the vehicle manual…</string>
+    <string name="send">Send</string>
+    <string name="microphone">Mic</string>
+    <string name="stop_recording">Stop</string>
+    <string name="listening">Listening… tap Stop to send</string>
+    <string name="loading_speech">Loading offline speech recognition…</string>
+    <string name="initial_message">Ask me about controls, warning lights, maintenance, procedures, or diagrams in the supplied manual.</string>
+    <string name="voice_start_description">Start offline voice input</string>
+    <string name="voice_stop_description">Stop recording and send voice message</string>
+    <string name="voice_stopping">…</string>
+    <string name="database_error">The bundled manual database could not be opened.</string>
+    <string name="voice_initialization_error">Offline voice input could not be initialized.</string>
+    <string name="voice_input_error">Voice input failed: %1$s</string>
+    <string name="microphone_permission_error">Microphone permission is required for offline voice input.</string>
+    <string name="searching_manual">Searching the manual locally…</string>
+    <plurals name="manual_source_count">
+        <item quantity="one">%d manual source ▾</item>
+        <item quantity="other">%d manual sources ▾</item>
+    </plurals>
+    <string name="image_caption">%1$s • p. %2$d</string>
+    <string name="image_dialog_title">%1$s — p. %2$d</string>
+    <string name="close">Close</string>
+</resources>

@@ -1,0 +1,8 @@
+<resources>
+    <color name="atlas_blue">#214F77</color>
+    <color name="atlas_blue_dark">#153650</color>
+    <color name="surface">#F5F7FA</color>
+    <color name="user_bubble">#DCEBFA</color>
+    <color name="text_primary">#17212B</color>
+    <color name="text_secondary">#607080</color>
+</resources>

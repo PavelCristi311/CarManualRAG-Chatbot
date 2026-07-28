@@ -1,0 +1,28 @@
+# Gradle and Android build output
+.gradle/
+build/
+**/build/
+.cxx/
+**/.cxx/
+captures/
+
+# Local Android SDK and IDE configuration
+local.properties
+.idea/
+*.iml
+
+# Signing material and generated packages
+*.jks
+*.keystore
+*.apk
+*.aab
+
+# Operating-system and editor files
+.DS_Store
+Thumbs.db
+*.swp
+*.swo
+
+# Local downloads and reports
+downloads/
+lint-results*
