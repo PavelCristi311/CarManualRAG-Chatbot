@@ -26,3 +26,5 @@ Thumbs.db
 # Local downloads and reports
 downloads/
 lint-results*
+.tools/
+tmp/
