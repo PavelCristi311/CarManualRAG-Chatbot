@@ -27,7 +27,7 @@ final class VoiceQueryNormalizer {
             "atlas", "manual", "vehicle", "car", "cora", "year", "ear");
     private static final Set<String> CAR_CONTEXT = setOf(
             "year", "ear", "model", "vehicle", "atlas", "manual", "engine",
-            "oil", "tire", "warning", "light", "car", "cora");
+            "oil", "tire", "warning", "light", "car", "cora", "wire");
     private static final Set<String> DOMAIN_WORDS = setOf(
             "atlas", "volkswagen", "vehicle", "car", "engine", "oil", "warning",
             "indicator", "light", "lights", "jumper", "cable", "cables", "diagram",
@@ -36,7 +36,7 @@ final class VoiceQueryNormalizer {
             "fuse", "box", "spare", "wheel", "seat", "belt", "airbag", "headlight",
             "headlights", "fuel", "cap", "towing", "capacity", "year", "model",
             "transmission", "steering", "dashboard", "symbol", "door", "hood",
-            "trunk", "ignition", "service", "maintenance");
+            "trunk", "ignition", "service", "maintenance", "wire", "wires");
     private static final List<String> FUZZY_TERMS = Arrays.asList(
             "atlas", "volkswagen", "vehicle", "engine", "warning", "indicator",
             "light", "lights", "jumper", "cable", "cables", "diagram", "battery",
@@ -44,7 +44,7 @@ final class VoiceQueryNormalizer {
             "temperature", "windshield", "washer", "wiper", "wipers", "fuse",
             "spare", "wheel", "seat", "airbag", "headlight", "headlights", "fuel",
             "towing", "capacity", "model", "transmission", "steering", "dashboard",
-            "symbol", "ignition", "service", "maintenance");
+            "symbol", "ignition", "service", "maintenance", "wire", "wires");
     private static final Set<String> NEVER_FUZZY = setOf(
             "about", "after", "again", "also", "been", "before", "could", "does",
             "from", "have", "here", "into", "just", "like", "made", "mean", "means",
@@ -55,6 +55,7 @@ final class VoiceQueryNormalizer {
 
     private VoiceQueryNormalizer() {}
 
+    /** Corrects only confident, context-supported ASR errors in a final transcript. */
     static String normalize(String transcript) {
         if (transcript == null) return "";
         String input = transcript.replaceAll("\\s+", " ").trim();
@@ -79,6 +80,7 @@ final class VoiceQueryNormalizer {
         return sentenceCase(result.toString().replaceAll("\\s+", " ").trim());
     }
 
+    /** Applies known homophone repairs only when their surrounding intent is clear. */
     private static String applyPhoneticFixes(String text, Set<String> words) {
         String corrected = text;
         boolean yearContext = hasAny(words, YEAR_CONTEXT);
@@ -98,6 +100,7 @@ final class VoiceQueryNormalizer {
         return corrected;
     }
 
+    /** Selects one unambiguous nearby automotive term within a strict edit limit. */
     private static String fuzzyDomainCorrection(String token, Set<String> contextWords) {
         if (token.length() < 4
                 || DOMAIN_WORDS.contains(token)
@@ -131,6 +134,7 @@ final class VoiceQueryNormalizer {
         return best;
     }
 
+    /** Computes bounded edit distance with adjacent transposition support. */
     private static int damerauLevenshtein(String left, String right, int limit) {
         if (Math.abs(left.length() - right.length()) > limit) return limit + 1;
         int[][] distance = new int[left.length() + 1][right.length() + 1];
@@ -156,6 +160,7 @@ final class VoiceQueryNormalizer {
         return distance[left.length()][right.length()];
     }
 
+    /** Extracts unique lowercase words used by contextual correction rules. */
     private static Set<String> words(String text) {
         Set<String> result = new HashSet<>();
         Matcher matcher = WORD.matcher(text);
@@ -163,6 +168,7 @@ final class VoiceQueryNormalizer {
         return result;
     }
 
+    /** Tests whether two small vocabulary sets overlap. */
     private static boolean hasAny(Set<String> words, Set<String> candidates) {
         for (String candidate : candidates) {
             if (words.contains(candidate)) return true;
@@ -170,15 +176,18 @@ final class VoiceQueryNormalizer {
         return false;
     }
 
+    /** Restores readable sentence casing without changing the recognized words. */
     private static String sentenceCase(String text) {
         if (text.isEmpty()) return text;
         return text.substring(0, 1).toUpperCase(Locale.ROOT) + text.substring(1);
     }
 
+    /** Creates immutable-in-practice lookup sets for normalization rules. */
     private static Set<String> setOf(String... values) {
         return new HashSet<>(Arrays.asList(values));
     }
 
+    /** Defines the intentionally small list of contextual homophone mappings. */
     private static Map<String, String> phoneticFixes() {
         Map<String, String> fixes = new HashMap<>();
         fixes.put("ear", "year");

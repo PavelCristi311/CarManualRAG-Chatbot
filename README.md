@@ -1,6 +1,6 @@
 # Atlas Manual Assistant
 
-Atlas Manual Assistant is a privacy-first Android application that answers questions about the bundled 2019 Volkswagen Atlas 3.6 L owner's manual. Text search, semantic retrieval, answer generation, speech recognition, text-to-speech, citations, and manual-image display all run on the device. The app does not request internet permission and does not use a cloud fallback.
+Atlas Manual Assistant is a privacy-first Android application that retrieves complete guidance from the bundled Volkswagen Atlas owner's manual. Text search, semantic retrieval, speech recognition, text-to-speech, citations, and manual-image display all run on the device. The app does not request internet permission and does not use a cloud fallback.
 
 > The repository contains large models and a manual-derived dataset. Read [Licensing and redistribution](#licensing-and-redistribution) before making it public.
 
@@ -9,9 +9,11 @@ Atlas Manual Assistant is a privacy-first Android application that answers quest
 - Accepts typed or offline voice questions.
 - Corrects a small, conservative set of speech-recognition errors in automotive context.
 - Searches manual chunks with both MiniLM embeddings and SQLite FTS5.
-- Answers direct known facts, warning-light questions, procedural questions, and image requests through specialized routes.
-- Uses a local SmolLM2 model only when deterministic routes cannot produce an answer.
-- Requires page citations and rejects unsupported generated numbers or colors.
+- Expands the selected chunk with up to two adjacent chunks on each side in
+  the same subchapter, plus directly referenced manual sections.
+- Streams a grounded, conversational answer from a warm Qwen2.5-0.5B model.
+- Falls back to the complete selected context if generation is incomplete or
+  fails grounding validation.
 - Shows the exact source excerpts and relevant manual illustrations.
 - Reads answers aloud with an installed offline English Android TTS voice.
 - Reports timing for each RAG stage.
@@ -25,10 +27,12 @@ The app has one programmatically constructed chat screen:
 1. At startup, two background executors initialize the manual/RAG pipeline and the Zipformer speech recognizer independently.
 2. The composer becomes available when the manual database is ready. The microphone also requires the speech recognizer and Android microphone permission.
 3. A typed question is submitted directly. A voice question is captured as 16 kHz mono PCM, decoded locally, normalized conservatively, and submitted automatically.
-4. The RAG engine retrieves and validates evidence, then chooses the safest answer route.
+4. The RAG engine retrieves and validates evidence, expands its logical
+   neighbors and references, then formats the complete source context.
 5. The response card displays the answer, optional images, expandable source excerpts, and detailed timings.
 6. If an offline English TTS voice exists, the answer is spoken.
-7. On activity destruction, pending work is stopped and audio, TTS, SQLite, ONNX Runtime, and llama.cpp resources are closed.
+7. On activity destruction, pending work is stopped and audio, TTS, SQLite,
+   ONNX Runtime, and llama.cpp resources are closed.
 
 ```mermaid
 flowchart TD
@@ -38,23 +42,20 @@ flowchart TD
     N --> D
     D --> I{Valid and safe input?}
     I -- No --> Z[Abstain]
-    I -- Yes --> F{Known manual fact?}
-    F -- Yes --> O[Verified cited answer]
-    F -- No --> E[MiniLM query embedding]
+    I -- Yes --> E[MiniLM query embedding]
     E --> H[Vector search + FTS5 search]
     H --> S[Rank fusion and evidence threshold]
     S -- Weak --> Z
-    S -- Strong --> R{Answer route}
-    R --> V[Image lookup]
-    R --> W[Warning-light resolver]
-    R --> X[Extractive answerer]
-    R --> L[SmolLM2 generation]
-    L --> G[Citation, number, color, and length guardrails]
-    G -- Invalid --> Z
-    G -- Valid --> O
+    S -- Strong --> R[Best chunk plus same-section neighbors and references]
+    R --> G[Compact complete-sentence facts]
+    G --> Q[Warm Qwen companion, token streaming]
+    Q --> X{Grounded and complete?}
+    X -- No --> F[Complete cited context fallback]
+    X -- Yes --> A[Conversational cited answer]
+    R --> V[Referenced and related figure lookup]
+    A --> O
+    F --> O
     V --> O
-    W --> O
-    X --> O
     O --> U[Chat card, sources, images, timings]
     U --> T[Offline Android TTS]
 ```
@@ -71,20 +72,27 @@ This approach keeps the binary and dependency graph small, but it also concentra
 
 ### Application pipeline
 
-`RagEngine` is the orchestration boundary. It owns `ManualRepository`, lazily initializes the embedder and LLM, records timings, and routes each question:
+`RagEngine` is the orchestration boundary. It owns `ManualRepository`, the
+embedder, records timings, and handles each question:
 
 1. trim and screen the input for obvious prompt-injection phrases;
-2. try deterministic manual facts;
-3. normalize the query and create a 384-dimensional MiniLM embedding;
-4. run hybrid retrieval;
-5. reject weak evidence;
-6. handle explicit image requests;
-7. try the warning-light resolver;
-8. try extractive sentence selection;
-9. fall back to local constrained generation;
-10. validate the generated answer before returning it.
+2. embed the user's original wording with MiniLM;
+3. run hybrid retrieval;
+4. reject weak evidence;
+5. select the strongest matching chunk;
+6. include up to two previous and two following chunks from the same subchapter;
+7. for a composite question, add one distinct retrieved branch only when it
+   covers at least two concepts not covered by the primary result;
+8. follow direct `⇒` references found in that context;
+9. select up to five complete, high-value sentences, preserving a distinct
+   complementary branch for composite questions;
+10. stream a Qwen2.5-0.5B answer and validate its completion, citations,
+    numbers, colors, and refusal patterns;
+11. fall back to every selected chunk in full if validation fails;
+12. attach explicitly referenced figures and related figures from nearby pages.
 
-`ChatAnswer` is the result passed to the UI. It contains answer text, source chunks, images, an abstention reason, and `RagTimings`.
+`ChatAnswer` is the result passed to the UI. It contains answer text, source
+chunks, images, and `RagTimings`.
 
 ### Retrieval and data
 
@@ -98,16 +106,35 @@ This approach keeps the binary and dependency graph small, but it also concentra
 | `MANUAL_CHUNKS_FTS` | FTS5 lexical index |
 | `MANUAL_IMAGES` | Full image, thumbnail, caption, and page metadata |
 
-The repository asks the native `atlas-sqlite` library for up to 36 semantic candidates and 36 lexical candidates. The semantic path uses sqlite-vec cosine distance; the lexical path uses FTS5/BM25. Candidate IDs are fused with reciprocal-rank-style weights:
+The source PDF is converted page-by-page with Microsoft MarkItDown into
+`manual/2021-vw-atlas.md`. Explicit `atlas-page` markers preserve the original
+651-page mapping, while `manual-asset://` image links point back to the existing
+202 image records. The database stores the resulting Markdown chunks, including
+headings and lists, rather than a separate plain-text extraction.
+
+The repository asks the native `atlas-sqlite` library for up to 36 semantic
+candidates and 36 lexical candidates. The semantic path uses sqlite-vec cosine
+distance. It automatically adds terminology from the best semantic section
+titles to a secondary lexical query. FTS5/BM25 first ranks matches from the
+user's own terms, then appends semantic-feedback matches. This prevents query
+expansion from displacing direct lexical evidence while still bridging user
+wording and manual terminology without phrase-specific synonym rules. Candidate
+IDs are fused with reciprocal-rank-style weights:
 
 - vector contribution: `0.58 / (60 + vectorRank)`;
 - lexical contribution: `0.42 / (60 + lexicalRank)`;
 - a bonus when both retrievers found the chunk;
 - lexical term-coverage and adjacent-term bonuses.
 
-Results are sorted, limited to two chunks per page, and capped at six. Evidence is considered strong only when at least one result appears in both rankings, has cosine distance at most `0.60`, and has fused score at least `0.0165`.
+Results are sorted, limited to two chunks per page, and capped at six. Evidence
+is considered strong when a result either has hybrid lexical/semantic agreement
+or is one of the top three exceptionally close semantic results. This lets
+paraphrased questions through without accepting weak semantic matches.
 
-Short chunks may include the following chunk from the same page. Image lookup checks exact result pages plus adjacent pages and ranks captions by query-term overlap.
+The response contains the selected complete Markdown chunk, a five-chunk
+same-subchapter window centered on it, and directly referenced sections.
+Figure numbers are resolved against `MANUAL_IMAGES`; caption search also finds
+related figures on the selected and neighboring pages.
 
 ### Embeddings
 
@@ -120,30 +147,50 @@ Short chunks may include the following chunk from the same page. Image lookup ch
 
 The model is installed from assets into `noBackupFilesDir` because native runtimes need a normal filesystem path. `AssetInstaller` uses an atomic `.part` copy and validates the expected byte count.
 
-### Deterministic answer routes
+### Rebuilding the manual index
 
-Specialized routes reduce dependence on generative behavior:
+The ingestion tool preserves `MANUAL_PAGES` and `MANUAL_IMAGES`, replaces only
+`MANUAL_CHUNKS`, rebuilds FTS5, and writes new 384-dimensional MiniLM embeddings
+from the Markdown chunks. Database replacement is atomic and occurs only after
+page, image, FTS, embedding-size, and SQLite integrity checks pass.
 
-- `ManualRepository.lookupFact` handles manual year and engine displacement from database evidence.
-- `WarningLightResolver` requires a specific warning section, a color/state statement, and a supported action.
-- `ExtractiveAnswerer` selects up to three high-overlap manual sentences and cites each source page.
-- Explicit image questions return a matched manual illustration rather than asking the LLM to describe it.
+```bash
+uv venv --python 3.12 .tools/manual-ingest
+uv pip install \
+  --python .tools/manual-ingest/bin/python \
+  -r tools/manual-ingest-requirements.txt
+.tools/manual-ingest/bin/python tools/ingest_manual.py
+```
 
-These routes are easier to audit and generally faster than local generation.
+Use `--skip-convert` to rebuild chunks and embeddings from an already generated
+Markdown file. MarkItDown does not expose pagewise PDF output, so the tool feeds
+it one PDF page at a time and adds stable page/image markers before chunking.
 
-### Local generation and guardrails
+### Warm conversational model and complete fallback
 
-`LlamaBridge` lazily copies and loads the SmolLM2 GGUF model through `InferenceEngineImpl` and the `ai-chat` JNI library. llama.cpp runs a 1,024-token context, a 128-token batch, four CPU threads, low-temperature sampling, and a maximum of 96 generated tokens for an answer.
+MiniLM is initialized before input is enabled and uses at most 80% of the
+device's logical processors (six workers on an eight-core device). The bundled
+Qwen2.5-0.5B Instruct Q4_0 model is also loaded during initialization. Its
+system-prompt KV state remains warm between questions.
 
-The system prompt requires short, cited, evidence-only answers. `AnswerGuardrails` then rejects:
+For each request, `RagEngine` gives the model no more than five complete
+sentences: up to two procedural facts and up to three complementary safety
+facts. A composite question uses two short passes through the same warm model:
+the safety branch streams first, then the procedural branch is appended. This
+is more reliable for the 0.5B model than asking one prompt to cover both needs.
+There is no wall-clock generation deadline. Timings separately report
+SEND-to-first-generated-token latency. The full adjacent/reference context and
+figures remain attached. If output is incomplete or fails grounding checks,
+the UI replaces the draft with the complete cited manual context.
 
-- blank answers and explicit abstentions from the model;
-- answers longer than 220 words;
-- missing citations or citations to pages outside the retrieved set;
-- numbers absent from all retrieved evidence;
-- color claims not present in the evidence for the cited page.
-
-The guardrails are intentionally conservative. They reduce, but cannot mathematically eliminate, hallucination.
+The on-screen timing report is grouped into `RAG`, `Model`, and `Output`.
+Model timing is measured inside llama.cpp and separates context selection,
+prompt formatting, tokenization, prompt prefill, token generation, Java token
+streaming, output finalization, grounding validation, and remaining model
+orchestration. Composite answers accumulate both model passes, while
+SEND-to-first-token remains a separate end-to-end latency measurement.
+See [TIME_ANALYSIS.md](TIME_ANALYSIS.md) for the exact timing boundaries,
+calculations, inclusions, and interpretation guidance.
 
 ### Voice input and speech output
 
@@ -165,14 +212,14 @@ Speech output uses Android `TextToSpeech` and selects an installed, non-network 
 
 ### Native layer
 
-There are two JNI libraries:
+There are two application JNI libraries:
 
 | Library | Source | Responsibility |
 | --- | --- | --- |
 | `atlas-sqlite` | `vector_sqlite.cpp`, SQLite, sqlite-vec | Read-only cosine and FTS5 searches |
-| `ai-chat` | `ai_chat.cpp`, llama.cpp | GGUF loading, prompt decoding, sampling, and cleanup |
+| `atlas-summary` | `summary_llm.cpp`, llama.cpp | Warm Qwen inference and token streaming |
 
-Only `arm64-v8a` is built. CMake statically compiles the SQLite amalgamation and sqlite-vec into `atlas-sqlite`; llama.cpp is built as a native subproject.
+Only `arm64-v8a` is built. CMake statically compiles the SQLite amalgamation and sqlite-vec into `atlas-sqlite`.
 
 ## Important architectural decisions
 
@@ -192,13 +239,18 @@ Only `arm64-v8a` is built. CMake statically compiles the SQLite amalgamation and
 
 **Trade-off:** rank weights and thresholds are hand-tuned constants. They should eventually be calibrated against a versioned evaluation set.
 
-### Deterministic routes before the LLM
+### Conversational answer with complete source fallback
 
-**Decision:** facts, warning lights, extractive procedures, and images bypass generation when possible.
+**Decision:** summarize a small set of complete retrieved facts with a warm
+on-device SLM, while retaining the complete best chunk, its logical neighbors,
+referenced sections, and figures as sources and fallback.
 
-**Why:** deterministic answers are faster, inspectable, and less likely to invent safety-critical details.
+**Why:** the main response is easier for a driver to use, while validation and
+the complete fallback prevent incomplete model output from hiding manual facts.
 
-**Trade-off:** route-specific code adds domain rules and can miss paraphrases not represented in its patterns.
+**Trade-off:** CPU-only prefill and generation add latency and substantially
+increase APK size. Weak retrieval still abstains rather than returning
+unrelated text.
 
 ### SQLite as the retrieval store
 
@@ -230,12 +282,12 @@ Only `arm64-v8a` is built. CMake statically compiles the SQLite amalgamation and
 | --- | --- | --- | --- | --- |
 | Privacy | Fully on-device | No network permission, no server retention, offline availability | Large package and device resource use | Cloud RAG is smaller and easier to update, but sends user/manual data off-device |
 | Retrieval | MiniLM + FTS5 + rank fusion | Handles paraphrases and exact terms; auditable evidence threshold | Requires threshold tuning and a prebuilt index | Vector-only is simpler but weaker for exact terminology; BM25-only misses semantic matches |
-| Answering | Deterministic routes, then small LLM | Fast common paths, citations, reduced hallucination | More domain rules; small LLM has limited reasoning | LLM-only is simpler to route but less reliable and slower |
+| Answering | Warm Qwen summary plus complete fallback | Conversational, cited, streamed, with auditable sources | CPU latency and residual generation risk | Extractive-only output is faster but more manual-like |
 | Storage | Bundled read-only SQLite | Single portable artifact; relational, FTS, and vector data together | Static content and duplicate native/platform SQLite connections | Room improves Android ergonomics but does not replace the native vector path |
 | ASR | Bundled Zipformer | Private and offline, domain hotwords | Adds about 69 MB and substantial initialization cost | Android/cloud speech is easier and often more accurate, but may require a network/service |
 | TTS | Installed offline Android voice | No bundled synthesis model; platform integration | Quality and availability vary by device | Bundled neural TTS is consistent but much larger and more complex |
 | UI | One Java activity with platform views | Few dependencies and easy deployment | Limited testability, previews, and scalable state management | Compose/MVVM scales better but adds framework and migration cost |
-| Native inference | llama.cpp on CPU | Broad GGUF support and no vendor service | JNI complexity, four fixed threads, arm64-only, slower on modest hardware | NNAPI/GPU/vendor SDK may be faster but is less portable |
+| Native retrieval | SQLite + sqlite-vec on CPU | Fast, auditable, fully offline | arm64-only native build | A managed/cloud vector service is easier to update but not offline |
 
 ## Project structure
 
@@ -249,7 +301,7 @@ Only `arm64-v8a` is built. CMake statically compiles the SQLite amalgamation and
 │   │   │   ├── asr/                    # Zipformer ASR model and vocabulary
 │   │   │   ├── database/manuals.db     # Manual, chunks, FTS index, embeddings, image metadata
 │   │   │   ├── manual_assets/          # Full WebP images and thumbnails
-│   │   │   └── models/                 # MiniLM and SmolLM2 models
+│   │   │   └── models/                 # MiniLM and Qwen models plus vocabulary
 │   │   ├── cpp/                        # JNI bridges and CMake configuration
 │   │   ├── java/
 │   │   │   ├── com/atlas/manualassistant/
@@ -258,13 +310,11 @@ Only `arm64-v8a` is built. CMake statically compiles the SQLite amalgamation and
 │   │   │   │   ├── ManualRepository.java
 │   │   │   │   ├── LocalEmbedder.java
 │   │   │   │   ├── ZipformerVoiceInput.java
-│   │   │   │   └── ...                 # Guardrails, resolvers, models, tokenizer
-│   │   │   └── com/arm/aichat/internal/
-│   │   │       └── InferenceEngineImpl.java
+│   │   │   │   └── ...                 # Guardrails, data models, tokenizer
 │   │   └── res/                         # Theme, colors, and user-facing strings
 │   └── src/test/                        # JVM unit tests
 ├── vendor/
-│   ├── llama.cpp/                       # Vendored native LLM runtime
+│   ├── llama.cpp/                       # Qwen inference runtime
 │   ├── sqlite/                          # SQLite amalgamation
 │   └── sqlite-vec/                      # Vector extension
 ├── build.gradle                         # Android Gradle Plugin version
@@ -316,13 +366,17 @@ Install on a connected arm64 device:
 adb install -r app/build/outputs/apk/debug/app-debug.apk
 ```
 
-The first start copies filesystem-backed models and the database into the app's no-backup directory. The LLM itself is loaded lazily only when a question reaches the generative fallback.
+The first start copies the filesystem-backed embedding model, Qwen model, and
+database into the app's no-backup directory before the question field is
+enabled.
 
 ## Verification
 
 The repository currently includes JVM tests for:
 
 - detailed RAG timing formatting;
+- retrieval fusion, evidence thresholds, target routing, and context formatting;
+- CPU worker-budget calculation;
 - contextual ASR correction;
 - unambiguous automotive typo correction;
 - preservation of ordinary non-automotive speech;
@@ -340,7 +394,7 @@ On a physical device, verify:
 
 1. typed queries and source expansion;
 2. first-run database/model copying;
-3. manual fact, warning-light, procedural, image, generation, and abstention routes;
+3. warning-light, procedural, image, complete-context, and abstention routes;
 4. microphone permission denial and approval;
 5. start/stop voice capture and the 30-second cutoff;
 6. offline operation with airplane mode enabled;
@@ -354,12 +408,13 @@ There is no versioned retrieval-quality or instrumentation test suite yet. That 
 Important constants are intentionally close to the code that uses them:
 
 - retrieval candidate counts, fusion thresholds, and evidence thresholds: `ManualRepository`;
-- prompt, visual routing, and context excerpt budget: `RagEngine`;
+- context-neighbor radius, reference count, and visual routing: `RagEngine`;
 - embedding dimension and token limit: `LocalEmbedder`;
-- LLM context, batch size, threads, and temperature: `ai_chat.cpp`;
 - recording duration, chunk size, beam paths, and hotword score: `ZipformerVoiceInput`.
 
-Treat changes to retrieval thresholds, prompts, token budgets, or ASR hotwords as behavior changes. Evaluate them against representative questions, including deliberately unanswerable and safety-sensitive cases.
+Treat changes to retrieval thresholds, context expansion, or ASR hotwords as
+behavior changes. Evaluate them against representative questions, including
+deliberately unanswerable and safety-sensitive cases.
 
 Expected asset byte sizes are checked in `AssetInstaller` callers. When replacing a model or database, update the corresponding constant or installation will fail by design.
 
@@ -370,14 +425,15 @@ Expected asset byte sizes are checked in `AssetInstaller` callers. When replacin
 - Model and database assets are copied to `noBackupFilesDir`.
 - Android backup is disabled.
 - Prompt-injection phrases are screened before retrieval.
-- Generated citations, numeric claims, and color claims are checked against retrieved evidence.
+- Generated answer text is validated against cited manual chunks; full chunks
+  are used when generation is unavailable or rejected.
 - Release minification and resource shrinking are enabled.
 
 Limitations:
 
 - This is an informational manual assistant, not a substitute for the vehicle's warning indicators, professional service, or safety instructions.
 - Pattern-based injection detection is not a complete security boundary.
-- JNI and native model parsers process large binary assets; only trusted, verified artifacts should be bundled.
+- JNI and ONNX parsers process binary assets; only trusted, verified artifacts should be bundled.
 - Release currently uses the debug signing configuration. Configure a protected production keystore outside version control before distributing an APK.
 - The app currently logs retrieval metadata in Android logs. It does not intentionally log full user questions or answers, but release logging should still be reviewed before production.
 
@@ -385,15 +441,17 @@ Limitations:
 
 The main bundled artifacts are approximately:
 
-- SmolLM2 GGUF: 256 MB;
 - Zipformer ASR assets: 69 MB;
 - sherpa-onnx AAR: 54 MB;
 - MiniLM ONNX model and vocabulary: 22 MB;
-- manual database: 11 MB;
+- Markdown-derived manual database: 9.5 MB;
 - manual images and thumbnails: 4 MB;
-- llama.cpp, SQLite, and sqlite-vec native code built for arm64.
+- Qwen2.5-0.5B Q4_0 companion model: 409 MB;
+- SQLite and sqlite-vec native code built for arm64.
 
-Actual APK size, memory usage, and latency depend on Gradle packaging, device CPU, storage, and Android's runtime extraction behavior. The fixed four-thread llama.cpp configuration favors predictability over device-adaptive tuning.
+Actual APK size, memory usage, and latency depend on Gradle packaging, device
+CPU, storage, and Android's runtime extraction behavior. The embedding runtime
+adapts to the device and uses at most 80% of its logical processors.
 
 ## Known limitations and future improvements
 

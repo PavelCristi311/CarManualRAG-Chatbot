@@ -10,6 +10,7 @@ final class SearchResult {
     final Integer lexicalRank;
     final Float distance;
 
+    /** Captures one ranked manual chunk and both retrieval diagnostics. */
     SearchResult(
             long chunkId,
             int page,

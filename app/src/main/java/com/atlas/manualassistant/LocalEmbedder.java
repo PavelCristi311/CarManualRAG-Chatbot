@@ -21,6 +21,7 @@ final class LocalEmbedder implements Closeable {
     private final OrtSession session;
     private final WordPieceTokenizer tokenizer;
 
+    /** Installs and opens the quantized MiniLM session under the shared CPU budget. */
     LocalEmbedder(Context context) throws Exception {
         File model = AssetInstaller.ensureFile(
                 context,
@@ -31,14 +32,14 @@ final class LocalEmbedder implements Closeable {
                 context.getAssets(), "models/minilm-vocab.txt");
         environment = OrtEnvironment.getEnvironment();
         OrtSession.SessionOptions options = new OrtSession.SessionOptions();
-        options.setIntraOpNumThreads(Math.max(
-                2, Math.min(4, Runtime.getRuntime().availableProcessors() - 1)));
+        options.setIntraOpNumThreads(CpuBudget.workerThreads());
         options.setInterOpNumThreads(1);
         options.setOptimizationLevel(
                 OrtSession.SessionOptions.OptLevel.ALL_OPT);
         session = environment.createSession(model.getAbsolutePath(), options);
     }
 
+    /** Mean-pools and L2-normalizes one query embedding for vector search. */
     synchronized float[] embed(String text) throws Exception {
         WordPieceTokenizer.Encoded encoded = tokenizer.encode(text, MAX_TOKENS);
         long[] shape = {1, MAX_TOKENS};
@@ -77,6 +78,7 @@ final class LocalEmbedder implements Closeable {
         }
     }
 
+    /** Releases the ONNX session owned by this embedder. */
     @Override
     public void close() {
         try {

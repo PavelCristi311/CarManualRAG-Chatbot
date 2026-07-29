@@ -23,6 +23,7 @@ final class WordPieceTokenizer {
     private final int sepId;
     private final int padId;
 
+    /** Loads the exact vocabulary used to train the bundled embedding model. */
     WordPieceTokenizer(AssetManager assets, String vocabAsset) throws IOException {
         vocabulary = new HashMap<>(32_768);
         try (BufferedReader reader = new BufferedReader(
@@ -39,6 +40,7 @@ final class WordPieceTokenizer {
         padId = require("[PAD]");
     }
 
+    /** Produces padded BERT input IDs, attention mask, and token-type IDs. */
     Encoded encode(String text, int maxLength) {
         List<Integer> pieces = new ArrayList<>(Math.min(maxLength, 64));
         pieces.add(clsId);
@@ -63,6 +65,7 @@ final class WordPieceTokenizer {
         return new Encoded(ids, mask, types);
     }
 
+    /** Greedily splits one token into the longest vocabulary subwords. */
     private void appendWordPieces(String token, List<Integer> output, int limit) {
         Integer whole = vocabulary.get(token);
         if (whole != null) {
@@ -99,12 +102,14 @@ final class WordPieceTokenizer {
         }
     }
 
+    /** Resolves a required control token and fails early for an invalid vocabulary. */
     private int require(String token) {
         Integer id = vocabulary.get(token);
         if (id == null) throw new IllegalStateException("Missing token " + token);
         return id;
     }
 
+    /** Matches the uncased model's accent normalization. */
     private static String stripAccents(String text) {
         return Normalizer.normalize(text, Normalizer.Form.NFD)
                 .replaceAll("\\p{M}+", "");
@@ -115,6 +120,7 @@ final class WordPieceTokenizer {
         final long[] attentionMask;
         final long[] tokenTypes;
 
+        /** Groups the three fixed-shape model inputs for one query. */
         Encoded(long[] inputIds, long[] attentionMask, long[] tokenTypes) {
             this.inputIds = inputIds;
             this.attentionMask = attentionMask;

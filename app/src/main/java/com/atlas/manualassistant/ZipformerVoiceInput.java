@@ -30,6 +30,7 @@ final class ZipformerVoiceInput implements Closeable {
     private static final short[] END_OF_AUDIO = new short[0];
     private static final String MODEL_DIR = "asr/zipformer-en-68m";
 
+    /** Receives lifecycle and transcript events on the recognition worker thread. */
     interface Listener {
         void onListeningStarted();
         void onPartialResult(String text);
@@ -43,18 +44,17 @@ final class ZipformerVoiceInput implements Closeable {
     private OnlineRecognizer recognizer;
     private volatile boolean closeRequested;
 
+    /** Retains only the application context needed by native ASR assets. */
     ZipformerVoiceInput(Context context) {
         this.context = context.getApplicationContext();
     }
 
-    boolean isRecording() {
-        return recording.get();
-    }
-
+    /** Loads the recognizer early so the first microphone interaction is responsive. */
     void prepare() {
         getRecognizer();
     }
 
+    /** Captures and decodes audio until Stop, timeout, interruption, or failure. */
     void recordUntilStopped(Listener listener) {
         if (!recording.compareAndSet(false, true)) return;
         OnlineStream stream = null;
@@ -123,6 +123,7 @@ final class ZipformerVoiceInput implements Closeable {
         }
     }
 
+    /** Reads PCM on a high-priority thread and feeds a bounded decoding queue. */
     private void captureAudio(
             AudioRecord recorder, ArrayBlockingQueue<short[]> audioQueue) {
         Process.setThreadPriority(Process.THREAD_PRIORITY_AUDIO);
@@ -151,6 +152,7 @@ final class ZipformerVoiceInput implements Closeable {
         }
     }
 
+    /** Stops microphone reads while allowing queued audio to finish decoding. */
     void requestStop() {
         recording.set(false);
         AudioRecord recorder = audioRecord;
@@ -163,6 +165,7 @@ final class ZipformerVoiceInput implements Closeable {
         }
     }
 
+    /** Lazily creates the shared recognizer with offline automotive hotwords. */
     private synchronized OnlineRecognizer getRecognizer() {
         if (recognizer != null) return recognizer;
         FeatureConfig features = new FeatureConfig();
@@ -201,6 +204,7 @@ final class ZipformerVoiceInput implements Closeable {
         return recognizer;
     }
 
+    /** Creates a mono 16 kHz recorder only after permission and format checks. */
     private AudioRecord createAudioRecord() {
         if (context.checkSelfPermission(Manifest.permission.RECORD_AUDIO)
                 != PackageManager.PERMISSION_GRANTED) {
@@ -222,10 +226,12 @@ final class ZipformerVoiceInput implements Closeable {
                 Math.max(minimum, CHUNK_SAMPLES * Short.BYTES * 2));
     }
 
+    /** Drains every inference step currently available for an online stream. */
     private static void decodeReady(OnlineRecognizer recognizer, OnlineStream stream) {
         while (recognizer.isReady(stream)) recognizer.decode(stream);
     }
 
+    /** Idempotently stops and releases the active Android recorder. */
     private void stopAndReleaseRecorder() {
         AudioRecord recorder = audioRecord;
         audioRecord = null;
@@ -240,6 +246,7 @@ final class ZipformerVoiceInput implements Closeable {
         recorder.release();
     }
 
+    /** Normalizes ASR spacing and casing before showing a transcript. */
     private static String clean(String text) {
         if (text == null) return "";
         String normalized = text.replaceAll("\\s+", " ").trim();
@@ -248,6 +255,7 @@ final class ZipformerVoiceInput implements Closeable {
                 + normalized.substring(1).toLowerCase(Locale.ROOT);
     }
 
+    /** Releases the native recognizer exactly once. */
     private synchronized void releaseRecognizer() {
         if (recognizer != null) {
             recognizer.release();
@@ -255,6 +263,7 @@ final class ZipformerVoiceInput implements Closeable {
         }
     }
 
+    /** Cancels recording now and releases recognition once capture has unwound. */
     @Override
     public void close() {
         closeRequested = true;

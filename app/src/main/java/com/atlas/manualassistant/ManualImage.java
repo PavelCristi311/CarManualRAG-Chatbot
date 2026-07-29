@@ -7,7 +7,13 @@ final class ManualImage {
     final String thumbnailPath;
     final String caption;
 
-    ManualImage(long id, int page, String assetPath, String thumbnailPath, String caption) {
+    /** Describes one full image and thumbnail stored with the manual. */
+    ManualImage(
+            long id,
+            int page,
+            String assetPath,
+            String thumbnailPath,
+            String caption) {
         this.id = id;
         this.page = page;
         this.assetPath = assetPath;

@@ -19,6 +19,7 @@ struct Candidate {
 
 extern "C"
 JNIEXPORT jdoubleArray JNICALL
+// Returns alternating chunk IDs and cosine distances for the nearest vectors.
 Java_com_atlas_manualassistant_VectorSqliteBridge_nativeSearch(
         JNIEnv *env,
         jclass,
@@ -98,6 +99,7 @@ Java_com_atlas_manualassistant_VectorSqliteBridge_nativeSearch(
 
 extern "C"
 JNIEXPORT jlongArray JNICALL
+// Returns FTS5-ranked chunk IDs for the safely quoted Java query.
 Java_com_atlas_manualassistant_VectorSqliteBridge_nativeLexicalSearch(
         JNIEnv *env,
         jclass,

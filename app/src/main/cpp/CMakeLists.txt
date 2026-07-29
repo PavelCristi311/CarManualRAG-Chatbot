@@ -9,14 +9,12 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(LLAMA_SRC "${CMAKE_CURRENT_LIST_DIR}/../../../../vendor/llama.cpp")
 add_subdirectory("${LLAMA_SRC}" build-llama)
 
-add_library(ai-chat SHARED ai_chat.cpp)
-target_include_directories(ai-chat PRIVATE
-        "${LLAMA_SRC}"
-        "${LLAMA_SRC}/common"
+add_library(atlas-summary SHARED summary_llm.cpp)
+target_include_directories(atlas-summary PRIVATE
         "${LLAMA_SRC}/include"
-        "${LLAMA_SRC}/ggml/include"
-        "${LLAMA_SRC}/ggml/src")
-target_link_libraries(ai-chat llama llama-common android log)
+        "${LLAMA_SRC}/ggml/include")
+target_compile_options(atlas-summary PRIVATE -O3 -ffast-math)
+target_link_libraries(atlas-summary llama android log)
 
 set(SQLITE_SRC "${CMAKE_CURRENT_LIST_DIR}/../../../../vendor/sqlite")
 set(SQLITE_VEC_SRC "${CMAKE_CURRENT_LIST_DIR}/../../../../vendor/sqlite-vec")

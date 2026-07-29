@@ -10,35 +10,26 @@ final class ChatAnswer {
     final String text;
     final List<SearchResult> sources;
     final List<ManualImage> images;
-    final boolean abstained;
-    final String reason;
-    final long elapsedMs;
     final RagTimings timings;
 
+    /** Captures the visible answer together with its evidence and diagnostics. */
     ChatAnswer(
             String text,
             List<SearchResult> sources,
             List<ManualImage> images,
-            boolean abstained,
-            String reason,
             RagTimings timings) {
         this.text = text;
         this.sources = sources == null ? Collections.emptyList() : sources;
         this.images = images == null ? Collections.emptyList() : images;
-        this.abstained = abstained;
-        this.reason = reason;
         this.timings = timings;
-        this.elapsedMs = timings.totalMs();
     }
 
-    static ChatAnswer abstain(
-            String reason, RagTimings timings, long startedNanos) {
+    /** Returns the safe fallback when the manual cannot support an answer. */
+    static ChatAnswer abstain(RagTimings timings, long startedNanos) {
         return new ChatAnswer(
                 ABSTENTION,
                 Collections.emptyList(),
                 Collections.emptyList(),
-                true,
-                reason,
                 timings.finish(startedNanos));
     }
 }

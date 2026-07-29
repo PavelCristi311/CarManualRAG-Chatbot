@@ -13,6 +13,11 @@ import android.os.Bundle;
 import android.speech.tts.TextToSpeech;
 import android.speech.tts.Voice;
 import android.text.InputType;
+import android.text.SpannableString;
+import android.text.Spanned;
+import android.text.style.ForegroundColorSpan;
+import android.text.style.StyleSpan;
+import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
 import android.view.inputmethod.InputMethodManager;
@@ -29,9 +34,15 @@ import java.util.Comparator;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.regex.Matcher;
+import java.util.regex.Pattern;
 
 public final class MainActivity extends Activity {
+    private static final String TAG = "AtlasTTFT";
     private static final int MICROPHONE_PERMISSION_REQUEST = 41;
+    private static final Pattern TIMING_HEADER = Pattern.compile(
+            "(?m)^(Response time analysis|RAG —.*|Model —.*|"
+                    + "Output —.*|Total:.*)$");
     private final ExecutorService worker = Executors.newSingleThreadExecutor();
     private final ExecutorService voiceWorker = Executors.newSingleThreadExecutor();
     private RagEngine engine;
@@ -48,6 +59,7 @@ public final class MainActivity extends Activity {
     private String pendingSpeech;
     private volatile boolean destroyed;
 
+    /** Builds the screen and warms all offline engines away from the UI thread. */
     @Override
     protected void onCreate(Bundle state) {
         super.onCreate(state);
@@ -70,6 +82,7 @@ public final class MainActivity extends Activity {
         });
     }
 
+    /** Prepares offline speech recognition independently from the RAG engine. */
     private void initializeVoiceInput() {
         voiceWorker.execute(() -> {
             ZipformerVoiceInput prepared =
@@ -92,12 +105,21 @@ public final class MainActivity extends Activity {
         });
     }
 
+    /** Composes the screen from focused header, transcript, and input views. */
     private View buildUi() {
-        int padding = dp(16);
         LinearLayout root = new LinearLayout(this);
         root.setOrientation(LinearLayout.VERTICAL);
         root.setBackgroundColor(getColor(R.color.surface));
+        root.addView(buildHeader(), matchWidthWrapHeight());
+        root.addView(buildMessageArea(), new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+        root.addView(buildComposer());
+        return root;
+    }
 
+    /** Creates the compact application identity header. */
+    private View buildHeader() {
+        int padding = dp(16);
         LinearLayout header = new LinearLayout(this);
         header.setOrientation(LinearLayout.VERTICAL);
         header.setPadding(padding, dp(14), padding, dp(12));
@@ -107,19 +129,23 @@ public final class MainActivity extends Activity {
         TextView subtitle = text(getString(R.string.subtitle), 12, 0xFFD9E8F5);
         header.addView(title);
         header.addView(subtitle);
-        root.addView(header, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT,
-                LinearLayout.LayoutParams.WRAP_CONTENT));
+        return header;
+    }
 
+    /** Creates the scrollable transcript and stores its mutable containers. */
+    private View buildMessageArea() {
+        int padding = dp(16);
         scroll = new ScrollView(this);
         scroll.setFillViewport(true);
         messages = new LinearLayout(this);
         messages.setOrientation(LinearLayout.VERTICAL);
         messages.setPadding(padding, padding, padding, padding);
         scroll.addView(messages);
-        root.addView(scroll, new LinearLayout.LayoutParams(
-                LinearLayout.LayoutParams.MATCH_PARENT, 0, 1f));
+        return scroll;
+    }
 
+    /** Creates the text, progress, microphone, and send controls. */
+    private View buildComposer() {
         LinearLayout composer = new LinearLayout(this);
         composer.setGravity(Gravity.CENTER_VERTICAL);
         composer.setPadding(dp(10), dp(8), dp(10), dp(10));
@@ -148,10 +174,17 @@ public final class MainActivity extends Activity {
         send.setOnClickListener(unused -> submit());
         composer.addView(send, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT, dp(52)));
-        root.addView(composer);
-        return root;
+        return composer;
     }
 
+    /** Returns the standard full-width layout parameters used by top-level rows. */
+    private static LinearLayout.LayoutParams matchWidthWrapHeight() {
+        return new LinearLayout.LayoutParams(
+                LinearLayout.LayoutParams.MATCH_PARENT,
+                LinearLayout.LayoutParams.WRAP_CONTENT);
+    }
+
+    /** Starts, stops, or requests permission for microphone input. */
     private void toggleVoiceInput() {
         if (voiceRecording) {
             stopVoiceInput();
@@ -167,6 +200,7 @@ public final class MainActivity extends Activity {
         startVoiceInput();
     }
 
+    /** Switches into recording mode and streams ASR partial results. */
     private void startVoiceInput() {
         if (engine == null || voiceInput == null || voiceRecording) return;
         if (textToSpeech != null) textToSpeech.stop();
@@ -210,6 +244,7 @@ public final class MainActivity extends Activity {
                 }));
     }
 
+    /** Requests a graceful ASR stop so buffered audio is decoded. */
     private void stopVoiceInput() {
         if (!voiceRecording || voiceInput == null) return;
         voiceRecording = false;
@@ -219,6 +254,7 @@ public final class MainActivity extends Activity {
         voiceInput.requestStop();
     }
 
+    /** Restores controls and submits a successful normalized transcript. */
     private void finishVoiceInput(String transcript, String error) {
         voiceRecording = false;
         microphone.setText(R.string.microphone);
@@ -237,7 +273,9 @@ public final class MainActivity extends Activity {
         if (normalizedTranscript.trim().length() >= 2) submit();
     }
 
+    /** Runs one question on the worker and paints model tokens incrementally. */
     private void submit() {
+        long submittedNanos = System.nanoTime();
         String question = input.getText().toString().trim();
         if (question.length() < 2 || engine == null) return;
         input.setText("");
@@ -248,7 +286,32 @@ public final class MainActivity extends Activity {
         progress.setVisibility(View.VISIBLE);
         TextView pending = addAssistantMessage(getString(R.string.searching_manual), null);
         worker.execute(() -> {
-            ChatAnswer answer = engine.ask(question);
+            StringBuilder streamed = new StringBuilder();
+            long[] firstModelTokenNanos = {0L};
+            ChatAnswer answer = engine.ask(question, token -> {
+                if (token == null || token.isEmpty()) return;
+                if (firstModelTokenNanos[0] == 0L && !token.isBlank()) {
+                    firstModelTokenNanos[0] =
+                            System.nanoTime() - submittedNanos;
+                    Log.d(
+                            TAG,
+                            "send-to-first-model-token="
+                                    + (firstModelTokenNanos[0] / 1_000_000L)
+                                    + "ms");
+                }
+                streamed.append(token);
+                String partial = streamed.toString().trim();
+                if (partial.isEmpty()
+                        || !partial.matches("(?s).*\\p{L}.*")) {
+                    return;
+                }
+                runOnUiThreadIfActive(() -> {
+                    pending.setText(partial);
+                    scrollToBottom();
+                });
+            });
+            answer.timings.firstModelTokenNanos =
+                    firstModelTokenNanos[0];
             runOnUiThreadIfActive(() -> {
                 View pendingCard = (View) pending.getParent();
                 messages.removeView((View) pendingCard.getParent());
@@ -261,6 +324,7 @@ public final class MainActivity extends Activity {
         });
     }
 
+    /** Adds a selectable user bubble and keeps the latest turn visible. */
     private void addUserMessage(String text) {
         LinearLayout row = row(Gravity.END);
         TextView bubble = userBubble(text);
@@ -271,6 +335,7 @@ public final class MainActivity extends Activity {
         scrollToBottom();
     }
 
+    /** Adds an assistant card and enriches completed answers with evidence metadata. */
     private TextView addAssistantMessage(String text, ChatAnswer answer) {
         LinearLayout row = row(Gravity.START);
         LinearLayout card = new LinearLayout(this);
@@ -282,47 +347,9 @@ public final class MainActivity extends Activity {
         card.addView(bubble);
 
         if (answer != null) {
-            if (!answer.images.isEmpty()) {
-                for (ManualImage image : answer.images) {
-                    ImageView view = loadImage(image.thumbnailPath);
-                    if (view != null) {
-                        view.setAdjustViewBounds(true);
-                        view.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
-                        view.setPadding(0, dp(10), 0, dp(4));
-                        view.setOnClickListener(unused -> showImage(image));
-                        card.addView(view, new LinearLayout.LayoutParams(
-                                LinearLayout.LayoutParams.MATCH_PARENT, dp(190)));
-                        TextView caption = text(
-                                getString(R.string.image_caption, image.caption, image.page),
-                                12,
-                                getColor(R.color.text_secondary));
-                        card.addView(caption);
-                    }
-                }
-            }
-            if (!answer.sources.isEmpty()) {
-                Button sources = new Button(this);
-                sources.setAllCaps(false);
-                sources.setText(getResources().getQuantityString(
-                        R.plurals.manual_source_count,
-                        answer.sources.size(),
-                        answer.sources.size()));
-                TextView details = text(sourceText(answer), 12,
-                        getColor(R.color.text_secondary));
-                details.setVisibility(View.GONE);
-                sources.setOnClickListener(unused -> details.setVisibility(
-                        details.getVisibility() == View.VISIBLE
-                                ? View.GONE : View.VISIBLE));
-                card.addView(sources);
-                card.addView(details);
-            }
-            TextView timing = text(
-                    answer.timings.detailedText(),
-                    11,
-                    getColor(R.color.text_secondary));
-            timing.setPadding(0, dp(8), 0, 0);
-            timing.setTextIsSelectable(true);
-            card.addView(timing);
+            appendImages(card, answer);
+            appendSources(card, answer);
+            appendTimings(card, answer);
         }
         row.addView(card, new LinearLayout.LayoutParams(
                 LinearLayout.LayoutParams.WRAP_CONTENT,
@@ -332,6 +359,76 @@ public final class MainActivity extends Activity {
         return bubble;
     }
 
+    /** Adds tappable thumbnails for figures connected to retrieved chunks. */
+    private void appendImages(LinearLayout card, ChatAnswer answer) {
+        for (ManualImage image : answer.images) {
+            ImageView view = loadImage(image.thumbnailPath);
+            if (view == null) continue;
+            view.setAdjustViewBounds(true);
+            view.setScaleType(ImageView.ScaleType.CENTER_INSIDE);
+            view.setPadding(0, dp(10), 0, dp(4));
+            view.setOnClickListener(unused -> showImage(image));
+            card.addView(view, new LinearLayout.LayoutParams(
+                    LinearLayout.LayoutParams.MATCH_PARENT, dp(190)));
+            card.addView(text(
+                    getString(R.string.image_caption, image.caption, image.page),
+                    12,
+                    getColor(R.color.text_secondary)));
+        }
+    }
+
+    /** Adds a collapsible view of every manual chunk behind the answer. */
+    private void appendSources(LinearLayout card, ChatAnswer answer) {
+        if (answer.sources.isEmpty()) return;
+        Button sources = new Button(this);
+        sources.setAllCaps(false);
+        sources.setText(getResources().getQuantityString(
+                R.plurals.manual_source_count,
+                answer.sources.size(),
+                answer.sources.size()));
+        TextView details = text(
+                sourceText(answer), 12, getColor(R.color.text_secondary));
+        details.setVisibility(View.GONE);
+        sources.setOnClickListener(unused -> details.setVisibility(
+                details.getVisibility() == View.VISIBLE
+                        ? View.GONE : View.VISIBLE));
+        card.addView(sources);
+        card.addView(details);
+    }
+
+    /** Shows phase timings so device performance remains observable. */
+    private void appendTimings(LinearLayout card, ChatAnswer answer) {
+        String report = answer.timings.detailedText();
+        TextView timing = text(
+                report,
+                11,
+                getColor(R.color.text_secondary));
+        timing.setText(styleTimingReport(report));
+        timing.setPadding(0, dp(8), 0, 0);
+        timing.setTextIsSelectable(true);
+        card.addView(timing);
+    }
+
+    /** Emphasizes category totals so a long timing report remains easy to scan. */
+    private SpannableString styleTimingReport(String report) {
+        SpannableString styled = new SpannableString(report);
+        Matcher matcher = TIMING_HEADER.matcher(report);
+        while (matcher.find()) {
+            styled.setSpan(
+                    new StyleSpan(Typeface.BOLD),
+                    matcher.start(),
+                    matcher.end(),
+                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+            styled.setSpan(
+                    new ForegroundColorSpan(getColor(R.color.atlas_blue)),
+                    matcher.start(),
+                    matcher.end(),
+                    Spanned.SPAN_EXCLUSIVE_EXCLUSIVE);
+        }
+        return styled;
+    }
+
+    /** Renders source chunks in page order for the expandable evidence view. */
     private String sourceText(ChatAnswer answer) {
         StringBuilder output = new StringBuilder();
         for (SearchResult source : answer.sources) {
@@ -343,6 +440,7 @@ public final class MainActivity extends Activity {
         return output.toString();
     }
 
+    /** Decodes a bundled manual image, returning null for a damaged asset. */
     private ImageView loadImage(String relativePath) {
         try (InputStream stream = getAssets().open("manual_assets/" + relativePath)) {
             Bitmap bitmap = BitmapFactory.decodeStream(stream);
@@ -354,6 +452,7 @@ public final class MainActivity extends Activity {
         }
     }
 
+    /** Opens a full-resolution manual figure in a dismissible dialog. */
     private void showImage(ManualImage manualImage) {
         ImageView image = loadImage(manualImage.assetPath);
         if (image == null) return;
@@ -369,6 +468,7 @@ public final class MainActivity extends Activity {
                 .show();
     }
 
+    /** Creates a consistently spaced chat row aligned to either speaker. */
     private LinearLayout row(int gravity) {
         LinearLayout row = new LinearLayout(this);
         row.setGravity(gravity);
@@ -380,6 +480,7 @@ public final class MainActivity extends Activity {
         return row;
     }
 
+    /** Styles the user's message bubble. */
     private TextView userBubble(String value) {
         TextView text = text(value, 15, getColor(R.color.text_primary));
         text.setTextIsSelectable(true);
@@ -388,6 +489,7 @@ public final class MainActivity extends Activity {
         return text;
     }
 
+    /** Creates text with the app's common line spacing. */
     private TextView text(String value, int sp, int color) {
         TextView view = new TextView(this);
         view.setText(value);
@@ -397,6 +499,7 @@ public final class MainActivity extends Activity {
         return view;
     }
 
+    /** Creates a solid rounded background in density-independent units. */
     private GradientDrawable rounded(int color, int radiusDp) {
         GradientDrawable drawable = new GradientDrawable();
         drawable.setColor(color);
@@ -404,25 +507,30 @@ public final class MainActivity extends Activity {
         return drawable;
     }
 
+    /** Defers scrolling until the latest layout pass has completed. */
     private void scrollToBottom() {
         scroll.post(() -> scroll.fullScroll(View.FOCUS_DOWN));
     }
 
+    /** Converts density-independent pixels to physical pixels. */
     private int dp(int value) {
         return Math.round(value * getResources().getDisplayMetrics().density);
     }
 
+    /** Hides the keyboard once a question is submitted. */
     private void hideKeyboard() {
         InputMethodManager manager = getSystemService(InputMethodManager.class);
         manager.hideSoftInputFromWindow(input.getWindowToken(), 0);
     }
 
+    /** Drops late callbacks after destruction instead of touching stale views. */
     private void runOnUiThreadIfActive(Runnable action) {
         runOnUiThread(() -> {
             if (!destroyed) action.run();
         });
     }
 
+    /** Continues voice capture only after the requested microphone permission. */
     @Override
     public void onRequestPermissionsResult(
             int requestCode, String[] permissions, int[] grantResults) {
@@ -437,6 +545,7 @@ public final class MainActivity extends Activity {
         }
     }
 
+    /** Selects and warms a fully offline English TTS voice. */
     private void initializeTts() {
         textToSpeech = new TextToSpeech(
                 getApplicationContext(),
@@ -456,6 +565,7 @@ public final class MainActivity extends Activity {
                 });
     }
 
+    /** Prefers deterministic US English voices that require no network. */
     private Voice chooseOfflineEnglishVoice(Set<Voice> voices) {
         if (voices == null) return null;
         return voices.stream()
@@ -468,6 +578,7 @@ public final class MainActivity extends Activity {
                 .orElse(null);
     }
 
+    /** Converts visual citations to spoken page references and queues narration. */
     private void speakAnswer(String answer) {
         if (answer == null || answer.trim().isEmpty()) return;
         if (!ttsReady || textToSpeech == null) {
@@ -486,6 +597,7 @@ public final class MainActivity extends Activity {
                 "atlas-answer-" + System.nanoTime());
     }
 
+    /** Stops native engines and background executors owned by the activity. */
     @Override
     protected void onDestroy() {
         destroyed = true;

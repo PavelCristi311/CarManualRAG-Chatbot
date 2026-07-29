@@ -15,6 +15,9 @@ final class AssetInstaller {
 
     private AssetInstaller() {}
 
+    /**
+     * Atomically installs a bundled asset when the validated local copy is absent.
+     */
     static File ensureFile(
             Context context,
             String assetPath,

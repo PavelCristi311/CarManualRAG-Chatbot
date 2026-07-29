@@ -25,10 +25,20 @@ final class AnswerGuardrails {
 
     private AnswerGuardrails() {}
 
+    /** Blocks requests that try to replace or disclose the companion instructions. */
     static boolean isPromptInjection(String question) {
         return INJECTION.matcher(question).find();
     }
 
+    /** Replaces model-authored citations with the verified source page. */
+    static String attachCitation(String answer, int page) {
+        if (answer == null || answer.isBlank()) return answer;
+        String withoutModelCitations =
+                CITATION.matcher(answer).replaceAll("").trim();
+        return withoutModelCitations + " [p. " + page + "]";
+    }
+
+    /** Checks citations, numeric facts, and warning colors against retrieved evidence. */
     static boolean validate(String answer, List<SearchResult> sources) {
         if (answer == null || answer.isBlank()
                 || answer.contains(ChatAnswer.ABSTENTION)
@@ -55,10 +65,15 @@ final class AnswerGuardrails {
 
         for (String paragraph : answer.split("\\n+")) {
             Matcher pageMatcher = CITATION.matcher(paragraph);
-            if (!pageMatcher.find()) continue;
-            int page = Integer.parseInt(pageMatcher.group(1));
-            String evidence = pageEvidence.getOrDefault(page, new StringBuilder())
-                    .toString().toLowerCase(Locale.ROOT);
+            StringBuilder citedEvidence = new StringBuilder();
+            while (pageMatcher.find()) {
+                int page = Integer.parseInt(pageMatcher.group(1));
+                citedEvidence.append(
+                        pageEvidence.getOrDefault(page, new StringBuilder()));
+            }
+            if (citedEvidence.length() == 0) continue;
+            String evidence =
+                    citedEvidence.toString().toLowerCase(Locale.ROOT);
             Matcher colors = COLOR.matcher(paragraph);
             while (colors.find()) {
                 if (!evidence.contains(colors.group(1).toLowerCase(Locale.ROOT))) {
@@ -69,6 +84,7 @@ final class AnswerGuardrails {
         return true;
     }
 
+    /** Collects normalized regex matches for conservative fact comparison. */
     private static Set<String> matches(Pattern pattern, String text) {
         Set<String> output = new HashSet<>();
         Matcher matcher = pattern.matcher(text);
